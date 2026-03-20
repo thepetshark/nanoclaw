@@ -63,14 +63,19 @@ function buildJid(
   return `tg:${chatId}`;
 }
 
-/** Parse a topic-aware JID into chat ID and optional thread ID. */
+/**
+ * Parse a topic-aware JID into chat ID and optional thread ID.
+ * Thread ID 1 is Telegram's General topic — it doesn't accept
+ * message_thread_id on outbound API calls, so we omit it.
+ */
 function parseJid(jid: string): { chatId: string; threadId?: number } {
   const raw = jid.replace(/^tg:/, '');
   const colonIdx = raw.indexOf(':');
   if (colonIdx === -1) return { chatId: raw };
+  const threadId = parseInt(raw.slice(colonIdx + 1), 10);
   return {
     chatId: raw.slice(0, colonIdx),
-    threadId: parseInt(raw.slice(colonIdx + 1), 10),
+    threadId: threadId === 1 ? undefined : threadId,
   };
 }
 

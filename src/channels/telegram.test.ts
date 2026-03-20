@@ -1069,6 +1069,20 @@ describe('TelegramChannel', () => {
       );
     });
 
+    it('sends General topic (thread 1) without message_thread_id', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.sendMessage('tg:-1001234567890:1', 'General topic reply');
+
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '-1001234567890',
+        'General topic reply',
+        { parse_mode: 'Markdown' },
+      );
+    });
+
     it('sends typing indicator to correct topic', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
