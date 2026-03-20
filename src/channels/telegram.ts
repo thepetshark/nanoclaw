@@ -41,6 +41,22 @@ async function sendTelegramMessage(
   }
 }
 
+/** Build a JID from a chat ID and optional forum topic thread ID. */
+function buildJid(chatId: number, threadId?: number): string {
+  return threadId ? `tg:${chatId}:${threadId}` : `tg:${chatId}`;
+}
+
+/** Parse a topic-aware JID into chat ID and optional thread ID. */
+function parseJid(jid: string): { chatId: string; threadId?: number } {
+  const raw = jid.replace(/^tg:/, '');
+  const colonIdx = raw.indexOf(':');
+  if (colonIdx === -1) return { chatId: raw };
+  return {
+    chatId: raw.slice(0, colonIdx),
+    threadId: parseInt(raw.slice(colonIdx + 1), 10),
+  };
+}
+
 export class TelegramChannel implements Channel {
   name = 'telegram';
 
@@ -64,15 +80,16 @@ export class TelegramChannel implements Channel {
     this.bot.command('chatid', (ctx) => {
       const chatId = ctx.chat.id;
       const chatType = ctx.chat.type;
+      const threadId = ctx.message?.message_thread_id;
+      const jid = buildJid(chatId, threadId);
       const chatName =
         chatType === 'private'
           ? ctx.from?.first_name || 'Private'
           : (ctx.chat as any).title || 'Unknown';
 
-      ctx.reply(
-        `Chat ID: \`tg:${chatId}\`\nName: ${chatName}\nType: ${chatType}`,
-        { parse_mode: 'Markdown' },
-      );
+      const lines = [`Chat ID: \`${jid}\``, `Name: ${chatName}`, `Type: ${chatType}`];
+      if (threadId) lines.push(`Topic: ${threadId}`);
+      ctx.reply(lines.join('\n'), { parse_mode: 'Markdown' });
     });
 
     // Command to check bot status
@@ -90,7 +107,7 @@ export class TelegramChannel implements Channel {
         if (TELEGRAM_BOT_COMMANDS.has(cmd)) return;
       }
 
-      const chatJid = `tg:${ctx.chat.id}`;
+      const chatJid = buildJid(ctx.chat.id, ctx.message.message_thread_id);
       let content = ctx.message.text;
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
@@ -167,7 +184,7 @@ export class TelegramChannel implements Channel {
 
     // Handle non-text messages with placeholders so the agent knows something was sent
     const storeNonText = (ctx: any, placeholder: string) => {
-      const chatJid = `tg:${ctx.chat.id}`;
+      const chatJid = buildJid(ctx.chat.id, ctx.message?.message_thread_id);
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
 
@@ -244,18 +261,20 @@ export class TelegramChannel implements Channel {
     }
 
     try {
-      const numericId = jid.replace(/^tg:/, '');
+      const { chatId, threadId } = parseJid(jid);
+      const options = threadId ? { message_thread_id: threadId } : {};
 
       // Telegram has a 4096 character limit per message — split if needed
       const MAX_LENGTH = 4096;
       if (text.length <= MAX_LENGTH) {
-        await sendTelegramMessage(this.bot.api, numericId, text);
+        await sendTelegramMessage(this.bot.api, chatId, text, options);
       } else {
         for (let i = 0; i < text.length; i += MAX_LENGTH) {
           await sendTelegramMessage(
             this.bot.api,
-            numericId,
+            chatId,
             text.slice(i, i + MAX_LENGTH),
+            options,
           );
         }
       }
@@ -284,8 +303,9 @@ export class TelegramChannel implements Channel {
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
     if (!this.bot || !isTyping) return;
     try {
-      const numericId = jid.replace(/^tg:/, '');
-      await this.bot.api.sendChatAction(numericId, 'typing');
+      const { chatId, threadId } = parseJid(jid);
+      const options = threadId ? { message_thread_id: threadId } : {};
+      await this.bot.api.sendChatAction(chatId, 'typing', options);
     } catch (err) {
       logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
     }

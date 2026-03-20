@@ -102,6 +102,7 @@ function createTextCtx(overrides: {
   messageId?: number;
   date?: number;
   entities?: any[];
+  messageThreadId?: number;
 }) {
   const chatId = overrides.chatId ?? 100200300;
   const chatType = overrides.chatType ?? 'group';
@@ -121,6 +122,7 @@ function createTextCtx(overrides: {
       date: overrides.date ?? Math.floor(Date.now() / 1000),
       message_id: overrides.messageId ?? 1,
       entities: overrides.entities ?? [],
+      message_thread_id: overrides.messageThreadId,
     },
     me: { username: 'andy_ai_bot' },
     reply: vi.fn(),
@@ -136,6 +138,7 @@ function createMediaCtx(overrides: {
   messageId?: number;
   caption?: string;
   extra?: Record<string, any>;
+  messageThreadId?: number;
 }) {
   const chatId = overrides.chatId ?? 100200300;
   return {
@@ -153,6 +156,7 @@ function createMediaCtx(overrides: {
       date: overrides.date ?? Math.floor(Date.now() / 1000),
       message_id: overrides.messageId ?? 1,
       caption: overrides.caption,
+      message_thread_id: overrides.messageThreadId,
       ...(overrides.extra || {}),
     },
     me: { username: 'andy_ai_bot' },
@@ -843,6 +847,7 @@ describe('TelegramChannel', () => {
       expect(currentBot().api.sendChatAction).toHaveBeenCalledWith(
         '100200300',
         'typing',
+        {},
       );
     });
 
@@ -935,6 +940,145 @@ describe('TelegramChannel', () => {
       await handler(ctx);
 
       expect(ctx.reply).toHaveBeenCalledWith('Andy is online.');
+    });
+  });
+
+  // --- Forum topics ---
+
+  describe('forum topic support', () => {
+    it('includes thread ID in JID for topic messages', async () => {
+      const opts = createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          'tg:100200300:42': {
+            name: 'Topic 42',
+            folder: 'topic-42',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({ text: 'Hello topic', messageThreadId: 42 });
+      await triggerTextMessage(ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300:42',
+        expect.objectContaining({
+          chat_jid: 'tg:100200300:42',
+          content: 'Hello topic',
+        }),
+      );
+    });
+
+    it('uses flat JID when no thread ID present', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({ text: 'No topic' });
+      await triggerTextMessage(ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({ chat_jid: 'tg:100200300' }),
+      );
+    });
+
+    it('includes thread ID in JID for non-text messages', async () => {
+      const opts = createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          'tg:100200300:42': {
+            name: 'Topic 42',
+            folder: 'topic-42',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({ messageThreadId: 42 });
+      await triggerMediaMessage('message:photo', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300:42',
+        expect.objectContaining({ chat_jid: 'tg:100200300:42' }),
+      );
+    });
+
+    it('sends message to correct topic via message_thread_id', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.sendMessage('tg:-1001234567890:42', 'Reply to topic');
+
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '-1001234567890',
+        'Reply to topic',
+        { message_thread_id: 42, parse_mode: 'Markdown' },
+      );
+    });
+
+    it('sends message without thread ID for flat JIDs', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.sendMessage('tg:-1001234567890', 'Reply to group');
+
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '-1001234567890',
+        'Reply to group',
+        { parse_mode: 'Markdown' },
+      );
+    });
+
+    it('sends typing indicator to correct topic', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.setTyping('tg:100200300:42', true);
+
+      expect(currentBot().api.sendChatAction).toHaveBeenCalledWith(
+        '100200300',
+        'typing',
+        { message_thread_id: 42 },
+      );
+    });
+
+    it('/chatid reports topic JID when in a topic', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const handler = currentBot().commandHandlers.get('chatid')!;
+      const ctx = {
+        chat: { id: -1001234567890, type: 'supergroup' as const, title: 'My Group' },
+        from: { first_name: 'Alice' },
+        message: { message_thread_id: 42 },
+        reply: vi.fn(),
+      };
+
+      await handler(ctx);
+
+      expect(ctx.reply).toHaveBeenCalledWith(
+        expect.stringContaining('tg:-1001234567890:42'),
+        expect.objectContaining({ parse_mode: 'Markdown' }),
+      );
+      expect(ctx.reply).toHaveBeenCalledWith(
+        expect.stringContaining('Topic: 42'),
+        expect.any(Object),
+      );
+    });
+
+    it('ownsJid accepts topic JIDs', () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      expect(channel.ownsJid('tg:-1001234567890:42')).toBe(true);
     });
   });
 
