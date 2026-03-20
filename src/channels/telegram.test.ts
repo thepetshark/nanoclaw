@@ -972,7 +972,7 @@ describe('TelegramChannel', () => {
       );
     });
 
-    it('uses flat JID when no thread ID present', async () => {
+    it('uses flat JID when no thread ID and no topic registrations', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -983,6 +983,38 @@ describe('TelegramChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
         expect.objectContaining({ chat_jid: 'tg:100200300' }),
+      );
+    });
+
+    it('defaults to General topic (1) when topic JIDs are registered but thread ID is missing', async () => {
+      const opts = createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          'tg:100200300:1': {
+            name: 'General',
+            folder: '100200300-1',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+          'tg:100200300:5': {
+            name: 'Topic 5',
+            folder: '100200300-5',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({ text: 'General topic message' });
+      await triggerTextMessage(ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300:1',
+        expect.objectContaining({
+          chat_jid: 'tg:100200300:1',
+          content: 'General topic message',
+        }),
       );
     });
 

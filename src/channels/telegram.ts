@@ -41,9 +41,26 @@ async function sendTelegramMessage(
   }
 }
 
-/** Build a JID from a chat ID and optional forum topic thread ID. */
-function buildJid(chatId: number, threadId?: number): string {
-  return threadId ? `tg:${chatId}:${threadId}` : `tg:${chatId}`;
+/**
+ * Build a JID from a chat ID and optional forum topic thread ID.
+ * Telegram's General topic (thread 1) omits message_thread_id from messages.
+ * When topic-based JIDs are registered for a group, treat missing thread ID
+ * as General topic (1) so messages route correctly.
+ */
+function buildJid(
+  chatId: number,
+  threadId: number | undefined,
+  registeredGroups?: Record<string, unknown>,
+): string {
+  if (threadId) return `tg:${chatId}:${threadId}`;
+  if (registeredGroups) {
+    const prefix = `tg:${chatId}:`;
+    const hasTopicRegistrations = Object.keys(registeredGroups).some((jid) =>
+      jid.startsWith(prefix),
+    );
+    if (hasTopicRegistrations) return `tg:${chatId}:1`;
+  }
+  return `tg:${chatId}`;
 }
 
 /** Parse a topic-aware JID into chat ID and optional thread ID. */
@@ -111,7 +128,11 @@ export class TelegramChannel implements Channel {
         if (TELEGRAM_BOT_COMMANDS.has(cmd)) return;
       }
 
-      const chatJid = buildJid(ctx.chat.id, ctx.message.message_thread_id);
+      const chatJid = buildJid(
+        ctx.chat.id,
+        ctx.message.message_thread_id,
+        this.opts.registeredGroups(),
+      );
       let content = ctx.message.text;
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
@@ -188,7 +209,11 @@ export class TelegramChannel implements Channel {
 
     // Handle non-text messages with placeholders so the agent knows something was sent
     const storeNonText = (ctx: any, placeholder: string) => {
-      const chatJid = buildJid(ctx.chat.id, ctx.message?.message_thread_id);
+      const chatJid = buildJid(
+        ctx.chat.id,
+        ctx.message?.message_thread_id,
+        this.opts.registeredGroups(),
+      );
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
 
