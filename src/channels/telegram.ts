@@ -87,7 +87,11 @@ export class TelegramChannel implements Channel {
           ? ctx.from?.first_name || 'Private'
           : (ctx.chat as any).title || 'Unknown';
 
-      const lines = [`Chat ID: \`${jid}\``, `Name: ${chatName}`, `Type: ${chatType}`];
+      const lines = [
+        `Chat ID: \`${jid}\``,
+        `Name: ${chatName}`,
+        `Type: ${chatType}`,
+      ];
       if (threadId) lines.push(`Topic: ${threadId}`);
       ctx.reply(lines.join('\n'), { parse_mode: 'Markdown' });
     });

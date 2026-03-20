@@ -1058,7 +1058,11 @@ describe('TelegramChannel', () => {
 
       const handler = currentBot().commandHandlers.get('chatid')!;
       const ctx = {
-        chat: { id: -1001234567890, type: 'supergroup' as const, title: 'My Group' },
+        chat: {
+          id: -1001234567890,
+          type: 'supergroup' as const,
+          title: 'My Group',
+        },
         from: { first_name: 'Alice' },
         message: { message_thread_id: 42 },
         reply: vi.fn(),
