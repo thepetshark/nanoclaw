@@ -1,5 +1,5 @@
 import https from 'https';
-import { Api, Bot } from 'grammy';
+import { Api, Bot, InputFile } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
@@ -466,14 +466,37 @@ export class TelegramChannel implements Channel {
     }
   }
 
-  async setTyping(jid: string, isTyping: boolean): Promise<void> {
+  async setTyping(
+    jid: string,
+    isTyping: boolean,
+    action: 'typing' | 'record_voice' = 'typing',
+  ): Promise<void> {
     if (!this.bot || !isTyping) return;
     try {
       const { chatId, threadId } = parseJid(jid);
       const options = threadId ? { message_thread_id: threadId } : {};
-      await this.bot.api.sendChatAction(chatId, 'typing', options);
+      await this.bot.api.sendChatAction(chatId, action, options);
     } catch (err) {
       logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
+    }
+  }
+
+  async sendVoice(jid: string, audio: Buffer): Promise<void> {
+    if (!this.bot) {
+      logger.warn('Telegram bot not initialized');
+      return;
+    }
+    try {
+      const { chatId, threadId } = parseJid(jid);
+      const options = threadId ? { message_thread_id: threadId } : {};
+      await this.bot.api.sendVoice(
+        chatId,
+        new InputFile(audio, 'voice.ogg'),
+        options,
+      );
+      logger.info({ jid }, 'Telegram voice message sent');
+    } catch (err) {
+      logger.error({ jid, err }, 'Failed to send Telegram voice message');
     }
   }
 }

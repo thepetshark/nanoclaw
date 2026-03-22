@@ -45,7 +45,13 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
+import { readEnvFile } from './env.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  buildTranscriptHeader,
+  createVoiceResponse,
+  extractVoiceTranscripts,
+} from './voice-response.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -208,9 +214,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
+  // Resend typing indicator every 4 seconds (Telegram expires it after ~5s)
   await channel.setTyping?.(chatJid, true);
+  const typingInterval = setInterval(() => {
+    channel.setTyping?.(chatJid, true);
+  }, 4000);
+
   let hadError = false;
   let outputSentToUser = false;
+  // Tracks the last timestamp we checked for voice transcripts.
+  // Advances after each response so we don't re-consume old voice messages.
+  let voiceCursor = previousCursor;
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
@@ -223,8 +237,54 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
-        await channel.sendMessage(chatJid, text);
+        // Check messages since the last voice check for voice transcripts.
+        // Queries DB at response time — works for both fresh and piped paths.
+        // voiceCursor advances after each check to avoid re-consuming.
+        const recentMessages = getMessagesSince(
+          chatJid,
+          voiceCursor,
+          ASSISTANT_NAME,
+          50,
+        );
+        const voiceTranscripts = extractVoiceTranscripts(recentMessages);
+        if (recentMessages.length > 0) {
+          voiceCursor = recentMessages[recentMessages.length - 1].timestamp;
+        }
+        const hasVoice = voiceTranscripts.length > 0;
+
+        let outText = text;
+        if (hasVoice) {
+          outText = `${buildTranscriptHeader(voiceTranscripts)}${text}`;
+        }
+
+        clearInterval(typingInterval);
+        await channel.sendMessage(chatJid, outText);
         outputSentToUser = true;
+
+        // Trigger TTS for voice responses
+        if (hasVoice && channel.sendVoice) {
+          const envVars = readEnvFile(['ELEVENLABS_API_KEY']);
+          const elevenLabsKey = envVars.ELEVENLABS_API_KEY || '';
+          if (elevenLabsKey) {
+            logger.info({ chatJid }, 'Starting voice response pipeline');
+            createVoiceResponse(text, elevenLabsKey)
+              .then(async (audio) => {
+                if (audio) {
+                  await (channel as any).setTyping?.(
+                    chatJid,
+                    true,
+                    'record_voice',
+                  );
+                  await channel.sendVoice!(chatJid, audio);
+                } else {
+                  logger.info({ chatJid }, 'Voice response skipped (NO_SPEAK or error)');
+                }
+              })
+              .catch((err) => {
+                logger.error({ chatJid, err }, 'Voice response pipeline failed');
+              });
+          }
+        }
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -239,6 +299,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   });
 
+  clearInterval(typingInterval);
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
@@ -428,6 +489,7 @@ async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
+
             // Show typing indicator while the container processes the piped message
             channel
               .setTyping?.(chatJid, true)
