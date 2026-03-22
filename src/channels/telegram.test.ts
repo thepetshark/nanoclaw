@@ -24,6 +24,12 @@ vi.mock('../logger.js', () => ({
   },
 }));
 
+// Mock transcription
+const mockTranscribeAudio = vi.fn();
+vi.mock('../transcription.js', () => ({
+  transcribeAudio: (...args: unknown[]) => mockTranscribeAudio(...args),
+}));
+
 // --- Grammy mock ---
 
 type Handler = (...args: any[]) => any;
@@ -40,6 +46,7 @@ vi.mock('grammy', () => ({
     api = {
       sendMessage: vi.fn().mockResolvedValue(undefined),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
+      getFile: vi.fn().mockResolvedValue({ file_path: 'voice/file_0.oga' }),
     };
 
     constructor(token: string) {
@@ -215,6 +222,9 @@ describe('TelegramChannel', () => {
       expect(currentBot().filterHandlers.has('message:photo')).toBe(true);
       expect(currentBot().filterHandlers.has('message:video')).toBe(true);
       expect(currentBot().filterHandlers.has('message:voice')).toBe(true);
+      expect(currentBot().filterHandlers.has('message:video_note')).toBe(
+        true,
+      );
       expect(currentBot().filterHandlers.has('message:audio')).toBe(true);
       expect(currentBot().filterHandlers.has('message:document')).toBe(true);
       expect(currentBot().filterHandlers.has('message:sticker')).toBe(true);
@@ -600,18 +610,21 @@ describe('TelegramChannel', () => {
       );
     });
 
-    it('stores voice message with placeholder', async () => {
+    it('stores voice message with placeholder when no API key', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
 
-      const ctx = createMediaCtx({});
+      const ctx = createMediaCtx({
+        extra: { voice: { file_id: 'voice-file-001' } },
+      });
       await triggerMediaMessage('message:voice', ctx);
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
         expect.objectContaining({ content: '[Voice message]' }),
       );
+      expect(mockTranscribeAudio).not.toHaveBeenCalled();
     });
 
     it('stores audio with placeholder', async () => {
@@ -1129,6 +1142,179 @@ describe('TelegramChannel', () => {
     it('ownsJid accepts topic JIDs', () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       expect(channel.ownsJid('tg:-1001234567890:42')).toBe(true);
+    });
+  });
+
+  // --- Voice transcription ---
+
+  describe('voice transcription', () => {
+    let originalFetch: typeof globalThis.fetch;
+
+    beforeEach(() => {
+      originalFetch = globalThis.fetch;
+      mockTranscribeAudio.mockReset();
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it('transcribes voice message when ElevenLabs key is set', async () => {
+      // Mock file download
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: { get: () => '100' },
+        arrayBuffer: () => Promise.resolve(new ArrayBuffer(100)),
+      }) as any;
+
+      mockTranscribeAudio.mockResolvedValue({
+        text: 'Hello from voice',
+        language: 'en',
+      });
+
+      const opts = createTestOpts();
+      const channel = new TelegramChannel(
+        'test-token',
+        opts,
+        'test-elevenlabs-key',
+      );
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        extra: { voice: { file_id: 'voice-file-001' } },
+      });
+      await triggerMediaMessage('message:voice', ctx);
+
+      expect(mockTranscribeAudio).toHaveBeenCalledWith(
+        expect.any(Buffer),
+        'test-elevenlabs-key',
+      );
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({ content: '[Voice: Hello from voice]' }),
+      );
+    });
+
+    it('falls back to failure message when transcription returns null', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: { get: () => '100' },
+        arrayBuffer: () => Promise.resolve(new ArrayBuffer(100)),
+      }) as any;
+
+      mockTranscribeAudio.mockResolvedValue(null);
+
+      const opts = createTestOpts();
+      const channel = new TelegramChannel(
+        'test-token',
+        opts,
+        'test-elevenlabs-key',
+      );
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        extra: { voice: { file_id: 'voice-file-001' } },
+      });
+      await triggerMediaMessage('message:voice', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content: '[Voice message — transcription failed]',
+        }),
+      );
+    });
+
+    it('falls back to download failed when file download fails', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        headers: { get: () => '0' },
+      }) as any;
+
+      const opts = createTestOpts();
+      const channel = new TelegramChannel(
+        'test-token',
+        opts,
+        'test-elevenlabs-key',
+      );
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        extra: { voice: { file_id: 'voice-file-001' } },
+      });
+      await triggerMediaMessage('message:voice', ctx);
+
+      expect(mockTranscribeAudio).not.toHaveBeenCalled();
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content: '[Voice message — download failed]',
+        }),
+      );
+    });
+
+    it('ignores voice from unregistered chats', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel(
+        'test-token',
+        opts,
+        'test-elevenlabs-key',
+      );
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        chatId: 999999,
+        extra: { voice: { file_id: 'voice-file-001' } },
+      });
+      await triggerMediaMessage('message:voice', ctx);
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+      expect(mockTranscribeAudio).not.toHaveBeenCalled();
+    });
+
+    it('routes voice transcription to correct topic', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: { get: () => '100' },
+        arrayBuffer: () => Promise.resolve(new ArrayBuffer(100)),
+      }) as any;
+
+      mockTranscribeAudio.mockResolvedValue({
+        text: 'Topic voice',
+        language: 'en',
+      });
+
+      const opts = createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          'tg:100200300:42': {
+            name: 'Topic 42',
+            folder: 'topic-42',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new TelegramChannel(
+        'test-token',
+        opts,
+        'test-elevenlabs-key',
+      );
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        messageThreadId: 42,
+        extra: { voice: { file_id: 'voice-file-001' } },
+      });
+      await triggerMediaMessage('message:voice', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300:42',
+        expect.objectContaining({
+          chat_jid: 'tg:100200300:42',
+          content: '[Voice: Topic voice]',
+        }),
+      );
     });
   });
 

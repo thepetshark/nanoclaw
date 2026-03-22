@@ -5,12 +5,15 @@ import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
+import { transcribeAudio } from '../transcription.js';
 import {
   Channel,
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
+
+const MAX_VOICE_DOWNLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
 
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
@@ -85,10 +88,84 @@ export class TelegramChannel implements Channel {
   private bot: Bot | null = null;
   private opts: TelegramChannelOpts;
   private botToken: string;
+  private elevenLabsApiKey: string;
 
-  constructor(botToken: string, opts: TelegramChannelOpts) {
+  constructor(
+    botToken: string,
+    opts: TelegramChannelOpts,
+    elevenLabsApiKey = '',
+  ) {
     this.botToken = botToken;
     this.opts = opts;
+    this.elevenLabsApiKey = elevenLabsApiKey;
+  }
+
+  /**
+   * Download a file from Telegram's servers by file_id.
+   * Retries once on transient network errors (ETIMEDOUT, etc.).
+   * Returns the file contents as a Buffer, or null on failure.
+   */
+  private async downloadTelegramFile(
+    fileId: string,
+  ): Promise<Buffer | null> {
+    const maxAttempts = 2;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const file = await this.bot!.api.getFile(fileId);
+        if (!file.file_path) {
+          logger.warn({ fileId }, 'Telegram getFile returned no file_path');
+          return null;
+        }
+
+        const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+        const res = await fetch(url, {
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (!res.ok) {
+          logger.warn(
+            { fileId, status: res.status },
+            'Failed to download Telegram file',
+          );
+          return null;
+        }
+
+        const contentLength = Number(
+          res.headers.get('content-length') ?? 0,
+        );
+        if (contentLength > MAX_VOICE_DOWNLOAD_BYTES) {
+          logger.warn(
+            { fileId, contentLength },
+            'Telegram voice file too large, skipping',
+          );
+          return null;
+        }
+
+        const arrayBuffer = await res.arrayBuffer();
+        if (arrayBuffer.byteLength > MAX_VOICE_DOWNLOAD_BYTES) {
+          logger.warn(
+            { fileId, bytes: arrayBuffer.byteLength },
+            'Telegram voice file too large, skipping',
+          );
+          return null;
+        }
+
+        return Buffer.from(arrayBuffer);
+      } catch (err) {
+        if (attempt < maxAttempts) {
+          logger.warn(
+            { fileId, attempt, err },
+            'Telegram file download failed, retrying',
+          );
+          await new Promise((r) => setTimeout(r, 1000));
+          continue;
+        }
+        logger.error({ fileId, err }, 'Telegram file download error');
+        return null;
+      }
+    }
+
+    return null;
   }
 
   async connect(): Promise<void> {
@@ -252,7 +329,66 @@ export class TelegramChannel implements Channel {
 
     this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
-    this.bot.on('message:voice', (ctx) => storeNonText(ctx, '[Voice message]'));
+    this.bot.on('message:voice', async (ctx) => {
+      const chatJid = buildJid(
+        ctx.chat.id,
+        ctx.message.message_thread_id,
+        this.opts.registeredGroups(),
+      );
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
+
+      let content = '[Voice message]';
+
+      if (this.elevenLabsApiKey) {
+        const audioBuffer = await this.downloadTelegramFile(
+          ctx.message.voice.file_id,
+        );
+        if (audioBuffer) {
+          const result = await transcribeAudio(
+            audioBuffer,
+            this.elevenLabsApiKey,
+          );
+          if (result) {
+            content = `[Voice: ${result.text}]`;
+          } else {
+            content = '[Voice message — transcription failed]';
+          }
+        } else {
+          content = '[Voice message — download failed]';
+        }
+      }
+
+      this.opts.onMessage(chatJid, {
+        id: ctx.message.message_id.toString(),
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content,
+        timestamp,
+        is_from_me: false,
+      });
+    });
+    this.bot.on('message:video_note', (ctx) =>
+      storeNonText(ctx, '[Video note]'),
+    );
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
     this.bot.on('message:document', (ctx) => {
       const name = ctx.message.document?.file_name || 'file';
@@ -347,12 +483,19 @@ export class TelegramChannel implements Channel {
 }
 
 registerChannel('telegram', (opts: ChannelOpts) => {
-  const envVars = readEnvFile(['TELEGRAM_BOT_TOKEN']);
+  const envVars = readEnvFile(['TELEGRAM_BOT_TOKEN', 'ELEVENLABS_API_KEY']);
   const token =
     process.env.TELEGRAM_BOT_TOKEN || envVars.TELEGRAM_BOT_TOKEN || '';
   if (!token) {
     logger.warn('Telegram: TELEGRAM_BOT_TOKEN not set');
     return null;
   }
-  return new TelegramChannel(token, opts);
+  const elevenLabsKey =
+    process.env.ELEVENLABS_API_KEY || envVars.ELEVENLABS_API_KEY || '';
+  if (!elevenLabsKey) {
+    logger.info(
+      'Telegram: ELEVENLABS_API_KEY not set — voice messages will not be transcribed',
+    );
+  }
+  return new TelegramChannel(token, opts, elevenLabsKey);
 });
