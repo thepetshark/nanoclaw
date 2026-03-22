@@ -1,47 +1,38 @@
 ---
 name: update-nanoclaw
-description: Efficiently bring upstream NanoClaw updates into a customized install, with preview, selective cherry-pick, and low token usage.
+description: Pull upstream NanoClaw updates into main, then merge main into custom. Two-branch workflow with automatic conflict resolution for known files.
 ---
 
 # About
 
-Your NanoClaw fork drifts from upstream as you customize it. This skill pulls upstream changes into your install without losing your modifications.
+This NanoClaw install uses a two-branch workflow:
+- **`main`** — clean upstream tracking branch. Only upstream and channel remote merges go here.
+- **`custom`** — deployed branch with all personal modifications. Deployed via systemd.
+
+This skill pulls upstream changes into `main`, then merges `main` into `custom`, handling known conflicts automatically.
 
 Run `/update-nanoclaw` in Claude Code.
 
-## How it works
+## Remotes
 
-**Preflight**: checks for clean working tree (`git status --porcelain`). If `upstream` remote is missing, asks you for the URL (defaults to `https://github.com/qwibitai/nanoclaw.git`) and adds it. Detects the upstream branch name (`main` or `master`).
+| Remote | URL | Purpose |
+|--------|-----|---------|
+| `origin` | `https://github.com/thepetshark/nanoclaw.git` | User's fork |
+| `upstream` | `https://github.com/qwibitai/nanoclaw.git` | Upstream NanoClaw |
+| `telegram` | `https://github.com/thepetshark/nanoclaw-telegram.git` | Telegram channel fork |
 
-**Backup**: creates a timestamped backup branch and tag (`backup/pre-update-<hash>-<timestamp>`, `pre-update-<hash>-<timestamp>`) before touching anything. Safe to run multiple times.
+## Known auto-resolvable conflicts
 
-**Preview**: runs `git log` and `git diff` against the merge base to show upstream changes since your last sync. Groups changed files into categories:
-- **Skills** (`.claude/skills/`): unlikely to conflict unless you edited an upstream skill
-- **Source** (`src/`): may conflict if you modified the same files
-- **Build/config** (`package.json`, `tsconfig*.json`, `container/`): review needed
-
-**Update paths** (you pick one):
-- `merge` (default): `git merge upstream/<branch>`. Resolves all conflicts in one pass.
-- `cherry-pick`: `git cherry-pick <hashes>`. Pull in only the commits you want.
-- `rebase`: `git rebase upstream/<branch>`. Linear history, but conflicts resolve per-commit.
-- `abort`: just view the changelog, change nothing.
-
-**Conflict preview**: before merging, runs a dry-run (`git merge --no-commit --no-ff`) to show which files would conflict. You can still abort at this point.
-
-**Conflict resolution**: opens only conflicted files, resolves the conflict markers, keeps your local customizations intact.
-
-**Validation**: runs `npm run build` and `npm test`.
-
-**Breaking changes check**: after validation, reads CHANGELOG.md for any `[BREAKING]` entries introduced by the update. If found, shows each breaking change and offers to run the recommended skill to migrate.
+These files always conflict on upstream merges and have standard resolutions:
+- **`package-lock.json`**: always take theirs (`git checkout --theirs package-lock.json && git add package-lock.json`)
+- **`package.json`**: take theirs, then verify no local dependencies were lost
 
 ## Rollback
 
 The backup tag is printed at the end of each run:
 ```
-git reset --hard pre-update-<hash>-<timestamp>
+git checkout custom && git reset --hard pre-update-<hash>-<timestamp>
 ```
-
-Backup branch `backup/pre-update-<hash>-<timestamp>` also exists.
 
 ## Token usage
 
@@ -50,186 +41,202 @@ Only opens files with actual conflicts. Uses `git log`, `git diff`, and `git sta
 ---
 
 # Goal
-Help a user with a customized NanoClaw install safely incorporate upstream changes without a fresh reinstall and without blowing tokens.
+Safely sync upstream NanoClaw changes into the two-branch fork (main → custom) without losing personal customizations.
 
 # Operating principles
 - Never proceed with a dirty working tree.
-- Always create a rollback point (backup branch + tag) before touching anything.
-- Prefer git-native operations (fetch, merge, cherry-pick). Do not manually rewrite files except conflict markers.
-- Default to MERGE (one-pass conflict resolution). Offer REBASE as an explicit option.
+- Always create a rollback point (backup branch + tag) on `custom` before touching anything.
+- The `main` branch must stay clean — only upstream/channel merges, no personal code.
+- The `custom` branch is the deploy target — all personal modifications live here.
+- Auto-resolve known conflict files (package-lock.json) without asking.
+- Prefer git-native operations. Do not manually rewrite files except conflict markers.
 - Keep token usage low: rely on `git status`, `git log`, `git diff`, and open only conflicted files.
 
-# Step 0: Preflight (stop early if unsafe)
-Run:
+# Step 0: Preflight
+
+Check working tree is clean:
 - `git status --porcelain`
-If output is non-empty:
-- Tell the user to commit or stash first, then stop.
+- If non-empty: tell the user to commit or stash first, then stop.
+
+Verify current branch:
+- `git branch --show-current`
+- Must be on `custom`. If not, tell user and stop.
 
 Confirm remotes:
 - `git remote -v`
-If `upstream` is missing:
-- Ask the user for the upstream repo URL (default: `https://github.com/qwibitai/nanoclaw.git`).
-- Add it: `git remote add upstream <user-provided-url>`
-- Then: `git fetch upstream --prune`
+- If `upstream` is missing: `git remote add upstream https://github.com/qwibitai/nanoclaw.git`
+- If `origin` is not `thepetshark/nanoclaw`: warn the user.
 
-Determine the upstream branch name:
-- `git branch -r | grep upstream/`
-- If `upstream/main` exists, use `main`.
-- If only `upstream/master` exists, use `master`.
-- Otherwise, ask the user which branch to use.
-- Store this as UPSTREAM_BRANCH for all subsequent commands. Every command below that references `upstream/main` should use `upstream/$UPSTREAM_BRANCH` instead.
-
-Fetch:
+Fetch all:
 - `git fetch upstream --prune`
+- `git fetch origin --prune`
 
 # Step 1: Create a safety net
-Capture current state:
+
+Capture current state (on `custom`):
 - `HASH=$(git rev-parse --short HEAD)`
 - `TIMESTAMP=$(date +%Y%m%d-%H%M%S)`
 
-Create backup branch and tag (using timestamp to avoid collisions on retry):
+Create backup branch and tag:
 - `git branch backup/pre-update-$HASH-$TIMESTAMP`
 - `git tag pre-update-$HASH-$TIMESTAMP`
 
-Save the tag name for later reference in the summary and rollback instructions.
+Save the tag name for rollback instructions.
 
-# Step 2: Preview what upstream changed (no edits yet)
-Compute common base:
-- `BASE=$(git merge-base HEAD upstream/$UPSTREAM_BRANCH)`
+# Step 2: Preview upstream changes
 
-Show upstream commits since BASE:
-- `git log --oneline $BASE..upstream/$UPSTREAM_BRANCH`
+Compute base between local main and upstream:
+- `git fetch upstream --prune`
+- `BASE=$(git merge-base main upstream/main)`
 
-Show local commits since BASE (custom drift):
-- `git log --oneline $BASE..HEAD`
+Show upstream commits since last sync:
+- `git log --oneline $BASE..upstream/main`
 
-Show file-level impact from upstream:
-- `git diff --name-only $BASE..upstream/$UPSTREAM_BRANCH`
+If no new commits: tell user "Already up to date" and stop.
 
-Bucket the upstream changed files:
-- **Skills** (`.claude/skills/`): unlikely to conflict unless the user edited an upstream skill
-- **Source** (`src/`): may conflict if user modified the same files
-- **Build/config** (`package.json`, `package-lock.json`, `tsconfig*.json`, `container/`, `launchd/`): review needed
+Show file-level impact:
+- `git diff --name-only $BASE..upstream/main`
+
+Bucket the changed files:
+- **Skills** (`.claude/skills/`): unlikely to conflict unless user edited an upstream skill
+- **Source** (`src/`): may conflict with custom modifications
+- **Build/config** (`package.json`, `package-lock.json`, `tsconfig*.json`, `container/`): auto-resolvable or review needed
 - **Other**: docs, tests, misc
 
-Present these buckets to the user and ask them to choose one path using AskUserQuestion:
-- A) **Full update**: merge all upstream changes
+Present buckets and ask the user to choose using AskUserQuestion:
+- A) **Full update**: merge all upstream changes (default)
 - B) **Selective update**: cherry-pick specific upstream commits
-- C) **Abort**: they only wanted the preview
-- D) **Rebase mode**: advanced, linear history (warn: resolves conflicts per-commit)
+- C) **Abort**: just view the changelog, change nothing
 
 If Abort: stop here.
 
-# Step 3: Conflict preview (before committing anything)
-If Full update or Rebase:
-- Dry-run merge to preview conflicts. Run these as a single chained command so the abort always executes:
-  ```
-  git merge --no-commit --no-ff upstream/$UPSTREAM_BRANCH; git diff --name-only --diff-filter=U; git merge --abort
-  ```
-- If conflicts were listed: show them and ask user if they want to proceed.
-- If no conflicts: tell user it is clean and proceed.
+# Step 3: Conflict preview
 
-# Step 4A: Full update (MERGE, default)
-Run:
-- `git merge upstream/$UPSTREAM_BRANCH --no-edit`
+Dry-run merge on main to preview conflicts:
+- `git stash` (if needed)
+- ```
+  git checkout main
+  git merge --no-commit --no-ff upstream/main; git diff --name-only --diff-filter=U; git merge --abort
+  git checkout custom
+  ```
+- If conflicts listed: show them and note which are auto-resolvable (package-lock.json).
+- Ask user if they want to proceed.
+
+# Step 4A: Merge upstream into main
+
+Switch to main and merge:
+- `git checkout main`
+- `git merge upstream/main --no-edit`
 
 If conflicts occur:
-- Run `git status` and identify conflicted files.
-- For each conflicted file:
-  - Open the file.
-  - Resolve only conflict markers.
-  - Preserve intentional local customizations.
-  - Incorporate upstream fixes/improvements.
-  - Do not refactor surrounding code.
-  - `git add <file>`
-- When all resolved:
-  - If merge did not auto-commit: `git commit --no-edit`
+- **package-lock.json**: auto-resolve with `git checkout --theirs package-lock.json && git add package-lock.json`
+- **package.json**: take theirs, then verify no local dependencies were dropped. Auto-resolve: `git checkout --theirs package.json && git add package.json`
+- **All other files**: open only the conflicted file, resolve conflict markers, preserve upstream intent (main should be clean upstream). `git add <file>`
+- When all resolved: `git commit --no-edit`
 
-# Step 4B: Selective update (CHERRY-PICK)
+# Step 4B: Selective update (CHERRY-PICK onto main)
+
 If user chose Selective:
-- Recompute BASE if needed: `BASE=$(git merge-base HEAD upstream/$UPSTREAM_BRANCH)`
-- Show commit list again: `git log --oneline $BASE..upstream/$UPSTREAM_BRANCH`
+- `git checkout main`
+- Show commit list: `git log --oneline $BASE..upstream/main`
 - Ask user which commit hashes they want.
-- Apply: `git cherry-pick <hash1> <hash2> ...`
+- `git cherry-pick <hash1> <hash2> ...`
 
 If conflicts during cherry-pick:
-- Resolve only conflict markers, then:
-  - `git add <file>`
-  - `git cherry-pick --continue`
-If user wants to stop:
-  - `git cherry-pick --abort`
+- Apply same auto-resolution rules as Step 4A.
+- `git add <file>` then `git cherry-pick --continue`
+If user wants to stop: `git cherry-pick --abort`
 
-# Step 4C: Rebase (only if user explicitly chose option D)
+# Step 5: Merge main into custom
+
+Switch to custom and merge main:
+- `git checkout custom`
+- `git merge main --no-edit`
+
+If conflicts occur:
+- **package-lock.json**: `git checkout --theirs package-lock.json && git add package-lock.json`
+- **Other files**: open the conflicted file, resolve markers. **Preserve custom modifications** — upstream changes should be incorporated without losing personal customizations.
+- Do not refactor surrounding code.
+- `git add <file>`
+- When all resolved: `git commit --no-edit`
+
+If no conflicts: merge auto-completes.
+
+# Step 6: Install and validate
+
 Run:
-- `git rebase upstream/$UPSTREAM_BRANCH`
-
-If conflicts:
-- Resolve conflict markers only, then:
-  - `git add <file>`
-  - `git rebase --continue`
-If it gets messy (more than 3 rounds of conflicts):
-  - `git rebase --abort`
-  - Recommend merge instead.
-
-# Step 5: Validation
-Run:
+- `npm install --legacy-peer-deps`
 - `npm run build`
-- `npm test` (do not fail the flow if tests are not configured)
+- `npx vitest run` (do not fail the flow if some tests fail — report results)
 
 If build fails:
 - Show the error.
-- Only fix issues clearly caused by the merge (missing imports, type mismatches from merged code).
+- Only fix issues clearly caused by the merge (missing imports, type mismatches).
 - Do not refactor unrelated code.
-- If unclear, ask the user before making changes.
+- If unclear, ask the user.
 
-# Step 6: Breaking changes check
-After validation succeeds, check if the update introduced any breaking changes.
+Check if container files changed:
+- `git diff --name-only pre-update-$HASH-$TIMESTAMP..HEAD -- container/`
+- If container files changed: run `./container/build.sh` and report result.
 
-Determine which CHANGELOG entries are new by diffing against the backup tag:
-- `git diff <backup-tag-from-step-1>..HEAD -- CHANGELOG.md`
+# Step 7: Breaking changes check
 
-Parse the diff output for lines starting with `+[BREAKING]`. Each such line is one breaking change entry. The format is:
+Diff CHANGELOG against the backup tag:
+- `git diff pre-update-$HASH-$TIMESTAMP..HEAD -- CHANGELOG.md`
+
+Parse for lines starting with `+[BREAKING]`. Format:
 ```
 [BREAKING] <description>. Run `/<skill-name>` to <action>.
 ```
 
-If no `[BREAKING]` lines are found:
-- Skip this step silently. Proceed to Step 7 (skill updates check).
+If no `[BREAKING]` lines: skip silently, proceed to Step 8.
 
-If one or more `[BREAKING]` lines are found:
-- Display a warning header to the user: "This update includes breaking changes that may require action:"
+If breaking changes found:
+- Display warning header.
 - For each breaking change, display the full description.
-- Collect all skill names referenced in the breaking change entries (the `/<skill-name>` part).
-- Use AskUserQuestion to ask the user which migration skills they want to run now. Options:
-  - One option per referenced skill (e.g., "Run /add-whatsapp to re-add WhatsApp channel")
-  - "Skip — I'll handle these manually"
-- Set `multiSelect: true` so the user can pick multiple skills if there are several breaking changes.
-- For each skill the user selects, invoke it using the Skill tool.
-- After all selected skills complete (or if user chose Skip), proceed to Step 7 (skill updates check).
+- Use AskUserQuestion to ask which migration skills to run.
+- For each selected skill, invoke it.
 
-# Step 7: Check for skill updates
-After the summary, check if skills are distributed as branches in this repo:
+# Step 8: Check for skill updates
+
+Check for upstream skill branches:
 - `git branch -r --list 'upstream/skill/*'`
 
-If any `upstream/skill/*` branches exist:
-- Use AskUserQuestion to ask: "Upstream has skill branches. Would you like to check for skill updates?"
-  - Option 1: "Yes, check for updates" (description: "Runs /update-skills to check for and apply skill branch updates")
-  - Option 2: "No, skip" (description: "You can run /update-skills later any time")
-- If user selects yes, invoke `/update-skills` using the Skill tool.
-- After the skill completes (or if user selected no), proceed to Step 8.
+If any exist:
+- Ask user: "Upstream has skill branches. Check for skill updates?"
+- If yes: invoke `/update-skills`
 
-# Step 8: Summary + rollback instructions
+# Step 9: Deploy
+
+Ask user if they want to restart the service:
+- Option 1: "Yes, restart nanoclaw now"
+- Option 2: "No, I'll restart later"
+
+If yes:
+- `systemctl --user restart nanoclaw`
+- Wait 2 seconds, then `systemctl --user status nanoclaw --no-pager | head -10`
+- Confirm service is running.
+
+# Step 10: Summary + rollback instructions
+
 Show:
-- Backup tag: the tag name created in Step 1
-- New HEAD: `git rev-parse --short HEAD`
-- Upstream HEAD: `git rev-parse --short upstream/$UPSTREAM_BRANCH`
+- Backup tag: `pre-update-$HASH-$TIMESTAMP`
+- Previous HEAD (custom): the hash from Step 1
+- New HEAD (custom): `git rev-parse --short HEAD`
+- Main HEAD: `git rev-parse --short main`
+- Upstream HEAD: `git rev-parse --short upstream/main`
 - Conflicts resolved (list files, if any)
 - Breaking changes applied (list skills run, if any)
-- Remaining local diff vs upstream: `git diff --name-only upstream/$UPSTREAM_BRANCH..HEAD`
+- Container rebuilt: yes/no
+- Service restarted: yes/no
+- Remaining local diff vs upstream: `git diff --name-only upstream/main..HEAD`
 
-Tell the user:
-- To rollback: `git reset --hard <backup-tag-from-step-1>`
-- Backup branch also exists: `backup/pre-update-<HASH>-<TIMESTAMP>`
-- Restart the service to apply changes:
-  - If using launchd: `launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist && launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist`
-  - If running manually: restart `npm run dev`
+Rollback instructions:
+```
+git checkout custom
+git reset --hard pre-update-<HASH>-<TIMESTAMP>
+npm run build
+systemctl --user restart nanoclaw
+```
+
+Backup branch also exists: `backup/pre-update-<HASH>-<TIMESTAMP>`
