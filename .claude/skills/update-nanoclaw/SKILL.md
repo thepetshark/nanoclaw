@@ -130,8 +130,12 @@ If Abort: stop here.
 
 # Step 3: Conflict preview
 
-Preview conflicts WITHOUT switching branches using merge-tree:
-- `git merge-tree $(git merge-base main upstream/main) main upstream/main 2>&1 | grep -E "^CONFLICT|changed in both" || echo "No conflicts detected"`
+Preview conflicts using a dry-run merge on main. Run as a single chained command so the abort always executes:
+```
+git checkout main && git merge --no-commit --no-ff upstream/main 2>&1; echo "---CONFLICTS---"; git diff --name-only --diff-filter=U 2>/dev/null; echo "---END---"; git merge --abort 2>/dev/null; git checkout custom
+```
+
+Parse the output between `---CONFLICTS---` and `---END---` for conflicted file names.
 
 If conflicts detected:
 - List the conflicted files.
