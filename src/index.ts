@@ -277,11 +277,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                   );
                   await channel.sendVoice!(chatJid, audio);
                 } else {
-                  logger.info({ chatJid }, 'Voice response skipped (NO_SPEAK or error)');
+                  logger.info(
+                    { chatJid },
+                    'Voice response skipped (NO_SPEAK or error)',
+                  );
                 }
               })
               .catch((err) => {
-                logger.error({ chatJid, err }, 'Voice response pipeline failed');
+                logger.error(
+                  { chatJid, err },
+                  'Voice response pipeline failed',
+                );
               });
           }
         }

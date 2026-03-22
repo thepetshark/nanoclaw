@@ -74,8 +74,7 @@ export function loadVoiceConfig(): VoiceConfig {
 /** Resolve the current voice ID from config. */
 export function resolveVoiceId(): string {
   const config = loadVoiceConfig();
-  const voiceName =
-    config.current_voice || config.default_voice;
+  const voiceName = config.current_voice || config.default_voice;
 
   if (voiceName && config.voices?.[voiceName]) {
     return config.voices[voiceName];
@@ -153,9 +152,7 @@ TEXT TO REWRITE:
  * Spawns a one-shot container that runs Claude Haiku via the SDK (handles OAuth).
  * Returns the adapted text, or null if the response shouldn't be spoken.
  */
-export async function adaptForSpeech(
-  text: string,
-): Promise<string | null> {
+export async function adaptForSpeech(text: string): Promise<string | null> {
   // Quick check: skip very short responses without spawning a container
   const wordCount = text.trim().split(/\s+/).length;
   if (wordCount <= 10) return null;
@@ -180,75 +177,73 @@ export async function adaptForSpeech(
     // Resolve on the first streaming output — don't wait for container exit.
     // The container enters an IPC wait loop after responding, so awaiting
     // runContainerAgent would block for the full idle timeout (30+ min).
-    const adaptedText = await new Promise<string | null>(
-      (resolve) => {
-        let resolved = false;
-        let containerProc: import('child_process').ChildProcess | null = null;
-        let containerName = '';
+    const adaptedText = await new Promise<string | null>((resolve) => {
+      let resolved = false;
+      let containerProc: import('child_process').ChildProcess | null = null;
+      let containerName = '';
 
-        runContainerAgent(
-          adapterGroup,
-          {
-            prompt,
-            groupFolder: 'voice-adapter',
-            chatJid: 'internal:voice-adapter',
-            isMain: false,
-          },
-          (proc, name) => {
-            containerProc = proc;
-            containerName = name;
-          },
-          async (result) => {
-            if (resolved) return;
-            if (result.result) {
-              resolved = true;
-              const text = (
-                typeof result.result === 'string'
-                  ? result.result
-                  : JSON.stringify(result.result)
-              )
-                .replace(/<internal>[\s\S]*?<\/internal>/g, '')
-                .trim();
-              resolve(text || null);
-
-              // Kill the container — we have our result
-              if (containerName) {
-                const { stopContainer, CONTAINER_RUNTIME_BIN } =
-                  await import('./container-runtime.js');
-                const { exec } = await import('child_process');
-                exec(stopContainer(containerName), { timeout: 10_000 });
-              }
-            }
-            if (result.status === 'error' && !resolved) {
-              resolved = true;
-              resolve(null);
-            }
-          },
-        ).catch((err) => {
-          if (!resolved) {
+      runContainerAgent(
+        adapterGroup,
+        {
+          prompt,
+          groupFolder: 'voice-adapter',
+          chatJid: 'internal:voice-adapter',
+          isMain: false,
+        },
+        (proc, name) => {
+          containerProc = proc;
+          containerName = name;
+        },
+        async (result) => {
+          if (resolved) return;
+          if (result.result) {
             resolved = true;
-            logger.error({ err }, 'Voice adapter container error');
-            resolve(null);
-          }
-        });
+            const text = (
+              typeof result.result === 'string'
+                ? result.result
+                : JSON.stringify(result.result)
+            )
+              .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+              .trim();
+            resolve(text || null);
 
-        // Safety timeout — don't wait forever
-        setTimeout(() => {
-          if (!resolved) {
-            resolved = true;
-            logger.warn('Voice adapter timed out');
-            resolve(null);
+            // Kill the container — we have our result
             if (containerName) {
-              import('./container-runtime.js').then(({ stopContainer }) => {
-                import('child_process').then(({ exec }) => {
-                  exec(stopContainer(containerName), { timeout: 10_000 });
-                });
-              });
+              const { stopContainer, CONTAINER_RUNTIME_BIN } =
+                await import('./container-runtime.js');
+              const { exec } = await import('child_process');
+              exec(stopContainer(containerName), { timeout: 10_000 });
             }
           }
-        }, 60_000);
-      },
-    );
+          if (result.status === 'error' && !resolved) {
+            resolved = true;
+            resolve(null);
+          }
+        },
+      ).catch((err) => {
+        if (!resolved) {
+          resolved = true;
+          logger.error({ err }, 'Voice adapter container error');
+          resolve(null);
+        }
+      });
+
+      // Safety timeout — don't wait forever
+      setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          logger.warn('Voice adapter timed out');
+          resolve(null);
+          if (containerName) {
+            import('./container-runtime.js').then(({ stopContainer }) => {
+              import('child_process').then(({ exec }) => {
+                exec(stopContainer(containerName), { timeout: 10_000 });
+              });
+            });
+          }
+        }
+      }, 60_000);
+    });
 
     if (!adaptedText || adaptedText === 'NO_SPEAK') {
       logger.info('Voice adapter returned NO_SPEAK or empty');
