@@ -29,10 +29,7 @@ describe('transcribeAudio', () => {
       json: async () => ({ text: 'Hello world', language_code: 'en' }),
     }) as any;
 
-    const result = await transcribeAudio(
-      Buffer.from('fake-audio'),
-      'test-key',
-    );
+    const result = await transcribeAudio(Buffer.from('fake-audio'), 'test-key');
 
     expect(result).toEqual({ text: 'Hello world', language: 'en' });
     expect(globalThis.fetch).toHaveBeenCalledWith(
@@ -67,10 +64,7 @@ describe('transcribeAudio', () => {
       text: async () => 'Unauthorized',
     }) as any;
 
-    const result = await transcribeAudio(
-      Buffer.from('fake-audio'),
-      'bad-key',
-    );
+    const result = await transcribeAudio(Buffer.from('fake-audio'), 'bad-key');
     expect(result).toBeNull();
   });
 
@@ -80,22 +74,16 @@ describe('transcribeAudio', () => {
       json: async () => ({ text: '' }),
     }) as any;
 
-    const result = await transcribeAudio(
-      Buffer.from('fake-audio'),
-      'test-key',
-    );
+    const result = await transcribeAudio(Buffer.from('fake-audio'), 'test-key');
     expect(result).toBeNull();
   });
 
   it('returns null on network error', async () => {
-    globalThis.fetch = vi.fn().mockRejectedValue(
-      new Error('Network failure'),
-    ) as any;
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValue(new Error('Network failure')) as any;
 
-    const result = await transcribeAudio(
-      Buffer.from('fake-audio'),
-      'test-key',
-    );
+    const result = await transcribeAudio(Buffer.from('fake-audio'), 'test-key');
     expect(result).toBeNull();
   });
 

@@ -46,11 +46,7 @@ export async function transcribeAudio(
   try {
     const formData = new FormData();
     formData.append('model_id', STT_MODEL);
-    formData.append(
-      'file',
-      new Blob([audioBuffer]),
-      'voice.ogg',
-    );
+    formData.append('file', new Blob([audioBuffer]), 'voice.ogg');
     formData.append('tag_audio_events', 'false');
 
     if (options?.language) {

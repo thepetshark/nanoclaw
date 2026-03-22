@@ -105,9 +105,7 @@ export class TelegramChannel implements Channel {
    * Retries once on transient network errors (ETIMEDOUT, etc.).
    * Returns the file contents as a Buffer, or null on failure.
    */
-  private async downloadTelegramFile(
-    fileId: string,
-  ): Promise<Buffer | null> {
+  private async downloadTelegramFile(fileId: string): Promise<Buffer | null> {
     const maxAttempts = 2;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -130,9 +128,7 @@ export class TelegramChannel implements Channel {
           return null;
         }
 
-        const contentLength = Number(
-          res.headers.get('content-length') ?? 0,
-        );
+        const contentLength = Number(res.headers.get('content-length') ?? 0);
         if (contentLength > MAX_VOICE_DOWNLOAD_BYTES) {
           logger.warn(
             { fileId, contentLength },

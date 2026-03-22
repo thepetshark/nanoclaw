@@ -222,9 +222,7 @@ describe('TelegramChannel', () => {
       expect(currentBot().filterHandlers.has('message:photo')).toBe(true);
       expect(currentBot().filterHandlers.has('message:video')).toBe(true);
       expect(currentBot().filterHandlers.has('message:voice')).toBe(true);
-      expect(currentBot().filterHandlers.has('message:video_note')).toBe(
-        true,
-      );
+      expect(currentBot().filterHandlers.has('message:video_note')).toBe(true);
       expect(currentBot().filterHandlers.has('message:audio')).toBe(true);
       expect(currentBot().filterHandlers.has('message:document')).toBe(true);
       expect(currentBot().filterHandlers.has('message:sticker')).toBe(true);
