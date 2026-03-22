@@ -30,6 +30,12 @@ vi.mock('../transcription.js', () => ({
   transcribeAudio: (...args: unknown[]) => mockTranscribeAudio(...args),
 }));
 
+// Mock image processing
+const mockProcessImageBuffer = vi.fn();
+vi.mock('../image.js', () => ({
+  processImageBuffer: (...args: unknown[]) => mockProcessImageBuffer(...args),
+}));
+
 // --- Grammy mock ---
 
 type Handler = (...args: any[]) => any;
@@ -164,6 +170,10 @@ function createMediaCtx(overrides: {
       message_id: overrides.messageId ?? 1,
       caption: overrides.caption,
       message_thread_id: overrides.messageThreadId,
+      photo: [
+        { file_id: 'small_id', file_unique_id: 's1', width: 90, height: 90 },
+        { file_id: 'large_id', file_unique_id: 'l1', width: 800, height: 600 },
+      ],
       ...(overrides.extra || {}),
     },
     me: { username: 'andy_ai_bot' },
@@ -190,11 +200,26 @@ async function triggerMediaMessage(
 // --- Tests ---
 
 describe('TelegramChannel', () => {
+  let savedFetch: typeof globalThis.fetch;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    savedFetch = globalThis.fetch;
+    // Default fetch mock for photo download (overridden in specific tests)
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: new Headers({ 'content-length': '1000' }),
+      arrayBuffer: async () => new ArrayBuffer(10),
+    }) as any;
+    // Default image processing mock
+    mockProcessImageBuffer.mockResolvedValue({
+      base64: 'dGVzdA==',
+      mediaType: 'image/jpeg',
+    });
   });
 
   afterEach(() => {
+    globalThis.fetch = savedFetch;
     vi.restoreAllMocks();
   });
 
@@ -566,7 +591,7 @@ describe('TelegramChannel', () => {
   // --- Non-text messages ---
 
   describe('non-text messages', () => {
-    it('stores photo with placeholder', async () => {
+    it('stores photo with images when processing succeeds', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -576,11 +601,14 @@ describe('TelegramChannel', () => {
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
-        expect.objectContaining({ content: '[Photo]' }),
+        expect.objectContaining({
+          content: '[Photo]',
+          images: [{ base64: 'dGVzdA==', mediaType: 'image/jpeg' }],
+        }),
       );
     });
 
-    it('stores photo with caption', async () => {
+    it('stores photo with caption and images when processing succeeds', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -590,7 +618,46 @@ describe('TelegramChannel', () => {
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
-        expect.objectContaining({ content: '[Photo] Look at this' }),
+        expect.objectContaining({
+          content: 'Look at this',
+          images: [{ base64: 'dGVzdA==', mediaType: 'image/jpeg' }],
+        }),
+      );
+    });
+
+    it('falls back to placeholder when download fails', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        headers: new Headers(),
+      }) as any;
+
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({});
+      await triggerMediaMessage('message:photo', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({ content: '[Photo — download failed]' }),
+      );
+    });
+
+    it('falls back to placeholder when processing fails', async () => {
+      mockProcessImageBuffer.mockResolvedValue(null);
+
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({});
+      await triggerMediaMessage('message:photo', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({ content: '[Photo — processing failed]' }),
       );
     });
 

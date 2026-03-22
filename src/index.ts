@@ -16,11 +16,13 @@ import {
   getRegisteredChannelNames,
 } from './channels/registry.js';
 import {
+  ContainerImage,
   ContainerOutput,
   runContainerAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
+import { collectImages, storeImages } from './image-cache.js';
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
@@ -187,6 +189,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const prompt = formatMessages(missedMessages, TIMEZONE);
 
+  // Collect images from the in-memory cache (DB doesn't store image data)
+  const images = collectImages(missedMessages);
+
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
@@ -225,7 +230,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Advances after each response so we don't re-consume old voice messages.
   let voiceCursor = previousCursor;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
+  const output = await runAgent(group, prompt, chatJid, images, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -335,6 +340,7 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
+  images?: ContainerImage[],
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
@@ -381,6 +387,7 @@ async function runAgent(
       group,
       {
         prompt,
+        images: images && images.length > 0 ? images : undefined,
         sessionId,
         groupFolder: group.folder,
         chatJid,
@@ -485,8 +492,9 @@ async function startMessageLoop(): Promise<void> {
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend, TIMEZONE);
+          const pipedImages = collectImages(messagesToSend);
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          if (queue.sendMessage(chatJid, formatted, pipedImages.length > 0 ? pipedImages : undefined)) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
@@ -630,6 +638,9 @@ async function main(): Promise<void> {
           }
           return;
         }
+      }
+      if (msg.images && msg.images.length > 0) {
+        storeImages(chatJid, msg.id, msg.images);
       }
       storeMessage(msg);
     },

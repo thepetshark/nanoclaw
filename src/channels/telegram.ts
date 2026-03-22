@@ -3,6 +3,7 @@ import { Api, Bot, InputFile } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
+import { processImageBuffer } from '../image.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import { transcribeAudio } from '../transcription.js';
@@ -14,6 +15,7 @@ import {
 } from '../types.js';
 
 const MAX_VOICE_DOWNLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_IMAGE_DOWNLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
 
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
@@ -105,7 +107,10 @@ export class TelegramChannel implements Channel {
    * Retries once on transient network errors (ETIMEDOUT, etc.).
    * Returns the file contents as a Buffer, or null on failure.
    */
-  private async downloadTelegramFile(fileId: string): Promise<Buffer | null> {
+  private async downloadTelegramFile(
+    fileId: string,
+    maxBytes = MAX_VOICE_DOWNLOAD_BYTES,
+  ): Promise<Buffer | null> {
     const maxAttempts = 2;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -129,19 +134,19 @@ export class TelegramChannel implements Channel {
         }
 
         const contentLength = Number(res.headers.get('content-length') ?? 0);
-        if (contentLength > MAX_VOICE_DOWNLOAD_BYTES) {
+        if (contentLength > maxBytes) {
           logger.warn(
             { fileId, contentLength },
-            'Telegram voice file too large, skipping',
+            'Telegram file too large, skipping',
           );
           return null;
         }
 
         const arrayBuffer = await res.arrayBuffer();
-        if (arrayBuffer.byteLength > MAX_VOICE_DOWNLOAD_BYTES) {
+        if (arrayBuffer.byteLength > maxBytes) {
           logger.warn(
             { fileId, bytes: arrayBuffer.byteLength },
-            'Telegram voice file too large, skipping',
+            'Telegram file too large, skipping',
           );
           return null;
         }
@@ -323,7 +328,70 @@ export class TelegramChannel implements Channel {
       });
     };
 
-    this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
+    this.bot.on('message:photo', async (ctx) => {
+      const chatJid = buildJid(
+        ctx.chat.id,
+        ctx.message.message_thread_id,
+        this.opts.registeredGroups(),
+      );
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
+
+      // Telegram provides multiple photo sizes — pick the largest
+      const photos = ctx.message.photo;
+      const largest = photos[photos.length - 1];
+      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+      let content = `[Photo]${caption}`;
+      let images: import('../types.js').MessageImage[] | undefined;
+
+      const buffer = await this.downloadTelegramFile(
+        largest.file_id,
+        MAX_IMAGE_DOWNLOAD_BYTES,
+      );
+      if (buffer) {
+        const processed = await processImageBuffer(buffer);
+        if (processed) {
+          images = [{ base64: processed.base64, mediaType: processed.mediaType }];
+          content = caption.trim() || '[Photo]';
+          logger.info(
+            { chatJid, sender: senderName, bytes: buffer.length },
+            'Processed Telegram image attachment',
+          );
+        } else {
+          content = `[Photo — processing failed]${caption}`;
+        }
+      } else {
+        content = `[Photo — download failed]${caption}`;
+      }
+
+      this.opts.onMessage(chatJid, {
+        id: ctx.message.message_id.toString(),
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content,
+        timestamp,
+        is_from_me: false,
+        images,
+      });
+    });
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
     this.bot.on('message:voice', async (ctx) => {
       const chatJid = buildJid(
