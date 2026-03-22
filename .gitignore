@@ -17,6 +17,9 @@ groups/main/*
 groups/global/*
 !groups/main/CLAUDE.md
 !groups/global/CLAUDE.md
+!groups/voice-adapter/
+groups/voice-adapter/*
+!groups/voice-adapter/CLAUDE.md
 
 # Secrets
 *.keys.json
