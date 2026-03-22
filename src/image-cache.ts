@@ -61,6 +61,21 @@ export function collectImages(
   return result;
 }
 
+/**
+ * Peek at cached images for a set of messages without consuming them.
+ */
+export function peekImages(
+  messages: Array<{ chat_jid: string; id: string }>,
+): MessageImage[] {
+  const now = Date.now();
+  const result: MessageImage[] = [];
+  for (const msg of messages) {
+    const entry = cache.get(key(msg.chat_jid, msg.id));
+    if (entry && entry.expiresAt >= now) result.push(...entry.images);
+  }
+  return result;
+}
+
 /** Purge expired entries. Called periodically. */
 export function pruneExpired(): void {
   const now = Date.now();

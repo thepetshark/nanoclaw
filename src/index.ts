@@ -22,7 +22,7 @@ import {
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
-import { collectImages, storeImages } from './image-cache.js';
+import { collectImages, peekImages, storeImages } from './image-cache.js';
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
@@ -200,7 +200,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
+    { group: group.name, messageCount: missedMessages.length, imageCount: images.length },
     'Processing messages',
   );
 
@@ -230,84 +230,90 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Advances after each response so we don't re-consume old voice messages.
   let voiceCursor = previousCursor;
 
-  const output = await runAgent(group, prompt, chatJid, images, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      if (text) {
-        // Check messages since the last voice check for voice transcripts.
-        // Queries DB at response time — works for both fresh and piped paths.
-        // voiceCursor advances after each check to avoid re-consuming.
-        const recentMessages = getMessagesSince(
-          chatJid,
-          voiceCursor,
-          ASSISTANT_NAME,
-          50,
-        );
-        const voiceTranscripts = extractVoiceTranscripts(recentMessages);
-        if (recentMessages.length > 0) {
-          voiceCursor = recentMessages[recentMessages.length - 1].timestamp;
-        }
-        const hasVoice = voiceTranscripts.length > 0;
+  const output = await runAgent(
+    group,
+    prompt,
+    chatJid,
+    images,
+    async (result) => {
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
+        if (text) {
+          // Check messages since the last voice check for voice transcripts.
+          // Queries DB at response time — works for both fresh and piped paths.
+          // voiceCursor advances after each check to avoid re-consuming.
+          const recentMessages = getMessagesSince(
+            chatJid,
+            voiceCursor,
+            ASSISTANT_NAME,
+            50,
+          );
+          const voiceTranscripts = extractVoiceTranscripts(recentMessages);
+          if (recentMessages.length > 0) {
+            voiceCursor = recentMessages[recentMessages.length - 1].timestamp;
+          }
+          const hasVoice = voiceTranscripts.length > 0;
 
-        let outText = text;
-        if (hasVoice) {
-          outText = `${buildTranscriptHeader(voiceTranscripts)}${text}`;
-        }
+          let outText = text;
+          if (hasVoice) {
+            outText = `${buildTranscriptHeader(voiceTranscripts)}${text}`;
+          }
 
-        clearInterval(typingInterval);
-        await channel.sendMessage(chatJid, outText);
-        outputSentToUser = true;
+          clearInterval(typingInterval);
+          await channel.sendMessage(chatJid, outText);
+          outputSentToUser = true;
 
-        // Trigger TTS for voice responses
-        if (hasVoice && channel.sendVoice) {
-          const envVars = readEnvFile(['ELEVENLABS_API_KEY']);
-          const elevenLabsKey = envVars.ELEVENLABS_API_KEY || '';
-          if (elevenLabsKey) {
-            logger.info({ chatJid }, 'Starting voice response pipeline');
-            createVoiceResponse(text, elevenLabsKey)
-              .then(async (audio) => {
-                if (audio) {
-                  await (channel as any).setTyping?.(
-                    chatJid,
-                    true,
-                    'record_voice',
+          // Trigger TTS for voice responses
+          if (hasVoice && channel.sendVoice) {
+            const envVars = readEnvFile(['ELEVENLABS_API_KEY']);
+            const elevenLabsKey = envVars.ELEVENLABS_API_KEY || '';
+            if (elevenLabsKey) {
+              logger.info({ chatJid }, 'Starting voice response pipeline');
+              createVoiceResponse(text, elevenLabsKey)
+                .then(async (audio) => {
+                  if (audio) {
+                    await (channel as any).setTyping?.(
+                      chatJid,
+                      true,
+                      'record_voice',
+                    );
+                    await channel.sendVoice!(chatJid, audio);
+                  } else {
+                    logger.info(
+                      { chatJid },
+                      'Voice response skipped (NO_SPEAK or error)',
+                    );
+                  }
+                })
+                .catch((err) => {
+                  logger.error(
+                    { chatJid, err },
+                    'Voice response pipeline failed',
                   );
-                  await channel.sendVoice!(chatJid, audio);
-                } else {
-                  logger.info(
-                    { chatJid },
-                    'Voice response skipped (NO_SPEAK or error)',
-                  );
-                }
-              })
-              .catch((err) => {
-                logger.error(
-                  { chatJid, err },
-                  'Voice response pipeline failed',
-                );
-              });
+                });
+            }
           }
         }
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+      if (result.status === 'success') {
+        queue.notifyIdle(chatJid);
+      }
 
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
+      if (result.status === 'error') {
+        hadError = true;
+      }
+    },
+  );
 
   clearInterval(typingInterval);
   await channel.setTyping?.(chatJid, false);
@@ -492,9 +498,19 @@ async function startMessageLoop(): Promise<void> {
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend, TIMEZONE);
-          const pipedImages = collectImages(messagesToSend);
 
-          if (queue.sendMessage(chatJid, formatted, pipedImages.length > 0 ? pipedImages : undefined)) {
+          // Peek at images without consuming — only consume after
+          // confirming which path (pipe vs new container) handles them.
+          const peekedImages = peekImages(messagesToSend);
+          if (
+            queue.sendMessage(
+              chatJid,
+              formatted,
+              peekedImages.length > 0 ? peekedImages : undefined,
+            )
+          ) {
+            // Pipe succeeded — consume images from cache so they aren't re-sent
+            if (peekedImages.length > 0) collectImages(messagesToSend);
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
@@ -510,7 +526,8 @@ async function startMessageLoop(): Promise<void> {
                 logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
               );
           } else {
-            // No active container — enqueue for a new one
+            // No active container — images stay in cache for
+            // processGroupMessages to collect when it spawns one.
             queue.enqueueMessageCheck(chatJid);
           }
         }
