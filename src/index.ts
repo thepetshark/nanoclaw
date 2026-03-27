@@ -247,7 +247,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length, imageCount: images.length },
+    {
+      group: group.name,
+      messageCount: missedMessages.length,
+      imageCount: images.length,
+    },
     'Processing messages',
   );
 

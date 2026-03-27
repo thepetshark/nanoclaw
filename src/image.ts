@@ -15,7 +15,11 @@ const MAX_BYTES = 3.75 * 1024 * 1024;
 /** Maximum download size from remote URLs. */
 const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024;
 
-export type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+export type ImageMediaType =
+  | 'image/jpeg'
+  | 'image/png'
+  | 'image/gif'
+  | 'image/webp';
 
 export interface ProcessedImage {
   base64: string;

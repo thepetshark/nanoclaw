@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
-import { storeImages, consumeImages, collectImages, pruneExpired } from './image-cache.js';
+import {
+  storeImages,
+  consumeImages,
+  collectImages,
+  pruneExpired,
+} from './image-cache.js';
 
 describe('image-cache', () => {
   afterEach(() => {

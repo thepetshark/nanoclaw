@@ -368,7 +368,9 @@ export class TelegramChannel implements Channel {
       if (buffer) {
         const processed = await processImageBuffer(buffer);
         if (processed) {
-          images = [{ base64: processed.base64, mediaType: processed.mediaType }];
+          images = [
+            { base64: processed.base64, mediaType: processed.mediaType },
+          ];
           content = caption.trim() || '[Photo]';
           logger.info(
             { chatJid, sender: senderName, bytes: buffer.length },

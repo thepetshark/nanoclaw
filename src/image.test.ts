@@ -33,8 +33,15 @@ describe('processImageBuffer', () => {
     // Create a small test image using sharp
     const sharp = (await import('sharp')).default;
     const testImage = await sharp({
-      create: { width: 200, height: 200, channels: 3, background: { r: 255, g: 0, b: 0 } },
-    }).png().toBuffer();
+      create: {
+        width: 200,
+        height: 200,
+        channels: 3,
+        background: { r: 255, g: 0, b: 0 },
+      },
+    })
+      .png()
+      .toBuffer();
 
     const result = await processImageBuffer(testImage);
     expect(result).not.toBeNull();
@@ -47,8 +54,15 @@ describe('processImageBuffer', () => {
   it('resizes images larger than max dimension', async () => {
     const sharp = (await import('sharp')).default;
     const largeImage = await sharp({
-      create: { width: 3000, height: 2000, channels: 3, background: { r: 0, g: 255, b: 0 } },
-    }).png().toBuffer();
+      create: {
+        width: 3000,
+        height: 2000,
+        channels: 3,
+        background: { r: 0, g: 255, b: 0 },
+      },
+    })
+      .png()
+      .toBuffer();
 
     const result = await processImageBuffer(largeImage);
     expect(result).not.toBeNull();
@@ -63,8 +77,15 @@ describe('processImageBuffer', () => {
   it('preserves small images without enlargement', async () => {
     const sharp = (await import('sharp')).default;
     const smallImage = await sharp({
-      create: { width: 50, height: 50, channels: 3, background: { r: 0, g: 0, b: 255 } },
-    }).png().toBuffer();
+      create: {
+        width: 50,
+        height: 50,
+        channels: 3,
+        background: { r: 0, g: 0, b: 255 },
+      },
+    })
+      .png()
+      .toBuffer();
 
     const result = await processImageBuffer(smallImage);
     expect(result).not.toBeNull();
@@ -106,12 +127,16 @@ describe('downloadAndProcessImage', () => {
       arrayBuffer: async () => new ArrayBuffer(0),
     }) as any;
 
-    const result = await downloadAndProcessImage('https://example.com/huge.jpg');
+    const result = await downloadAndProcessImage(
+      'https://example.com/huge.jpg',
+    );
     expect(result).toBeNull();
   });
 
   it('returns null on network error', async () => {
-    globalThis.fetch = vi.fn().mockRejectedValue(new Error('network error')) as any;
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValue(new Error('network error')) as any;
 
     const result = await downloadAndProcessImage('https://example.com/img.jpg');
     expect(result).toBeNull();
@@ -120,13 +145,24 @@ describe('downloadAndProcessImage', () => {
   it('downloads and processes a valid image', async () => {
     const sharp = (await import('sharp')).default;
     const testImage = await sharp({
-      create: { width: 100, height: 100, channels: 3, background: { r: 128, g: 128, b: 128 } },
-    }).jpeg().toBuffer();
+      create: {
+        width: 100,
+        height: 100,
+        channels: 3,
+        background: { r: 128, g: 128, b: 128 },
+      },
+    })
+      .jpeg()
+      .toBuffer();
 
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
       headers: new Headers({ 'content-length': testImage.length.toString() }),
-      arrayBuffer: async () => testImage.buffer.slice(testImage.byteOffset, testImage.byteOffset + testImage.byteLength),
+      arrayBuffer: async () =>
+        testImage.buffer.slice(
+          testImage.byteOffset,
+          testImage.byteOffset + testImage.byteLength,
+        ),
     }) as any;
 
     const result = await downloadAndProcessImage('https://example.com/img.jpg');
